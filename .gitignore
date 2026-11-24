@@ -1,0 +1,8 @@
+# Entorno virtual y bytecode
+LecturaEDF/venv/
+**/__pycache__/
+*.pyc
+
+# Estudio de sueño (EDF, RML y reportes del paciente).
+# No se publica: el repositorio de GitHub es público.
+archivos/
