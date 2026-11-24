@@ -4,7 +4,7 @@ import numpy as np
 import pyedflib
 import neurokit2 as nk
 from scipy.signal import find_peaks, periodogram, welch, spectrogram
-from scipy.interpolate import interp1d
+from scipy.interpolate import PchipInterpolator, interp1d
 import math
 
 
@@ -291,8 +291,73 @@ def corregir_distoles_segunda_pasada(distole, sistole, ppg, fs, max_iter=80):
     )
     return distole, err
 
+
+def unir_extremos(t_ext, y_ext, t_fino):
+    """Curva que pasa por cada extremo. Une máximos con máximos, o valles con valles."""
+    t_ext = np.asarray(t_ext, dtype=float)
+    y_ext = np.asarray(y_ext, dtype=float)
+    t_fino = np.asarray(t_fino, dtype=float)
+    curva = np.full(t_fino.shape, np.nan)
+    if t_ext.size < 2:
+        return curva
+    orden = np.argsort(t_ext)
+    t_ext, y_ext = t_ext[orden], y_ext[orden]
+    t_ext, unicos = np.unique(t_ext, return_index=True)
+    y_ext = y_ext[unicos]
+    if t_ext.size < 2:
+        return curva
+    if t_ext.size == 2:
+        curva = np.interp(t_fino, t_ext, y_ext).astype(float)
+    else:
+        curva = np.asarray(PchipInterpolator(t_ext, y_ext)(t_fino), dtype=float)
+    curva[t_fino < t_ext[0]] = y_ext[0]
+    curva[t_fino > t_ext[-1]] = y_ext[-1]
+    return curva
+
+
+def primer_paso_huang(emd, t, senal):
+    """Máximos, valles, envolventes que los unen y su media."""
+    t = np.asarray(t, dtype=float)
+    senal = np.asarray(senal, dtype=float)
+    max_pos, max_val, min_pos, min_val, _ = emd.find_extrema(t, senal)
+    env_sup = unir_extremos(max_pos, max_val, t)
+    env_inf = unir_extremos(min_pos, min_val, t)
+    media = (env_sup + env_inf) / 2.0
+    return max_pos, max_val, min_pos, min_val, env_sup, env_inf, media
+
+
+def dibujar_envolventes(ax, t, senal, t_env, max_pos, max_val, min_pos, min_val, env_sup, env_inf, media, titulo, nombre_senal):
+    """Tacograma con envolvente superior, inferior y media."""
+    ax.plot(t, senal, color="#1f4e79", linewidth=1.15, label=nombre_senal, zorder=2)
+    ax.plot(t_env, env_sup, color="#2e7d32", linewidth=2.0, label="Envolvente superior", zorder=3)
+    ax.plot(t_env, env_inf, color="#6a1b9a", linewidth=2.0, label="Envolvente inferior", zorder=3)
+    ax.plot(t_env, media, color="#e65100", linewidth=1.8, label="Media", zorder=4)
+    ax.plot(max_pos, max_val, linestyle="none", marker="^", color="#2e7d32", markersize=5, markeredgewidth=0, label=f"Máximos n={len(max_pos)}", zorder=5)
+    ax.plot(min_pos, min_val, linestyle="none", marker="v", color="#6a1b9a", markersize=5, markeredgewidth=0, label=f"Valles n={len(min_pos)}", zorder=5)
+    serie = np.concatenate([
+        np.asarray(senal, dtype=float).ravel(),
+        np.asarray(env_sup, dtype=float).ravel(),
+        np.asarray(env_inf, dtype=float).ravel(),
+    ])
+    serie = serie[np.isfinite(serie)]
+    if serie.size:
+        bajo, alto = float(np.min(serie)), float(np.max(serie))
+        margen = 0.06 * (alto - bajo if alto > bajo else 1.0)
+        ax.set_ylim(bajo - margen, alto + margen)
+    ax.set_title(titulo, loc="left")
+    ax.set_ylabel("Intervalo PP (ms)")
+    ax.grid(True, linestyle=":", alpha=0.45)
+    ax.margins(x=0.01)
+
+
 # Ruta del archivo
-file_name = r"D:\Escuela IPN\Servicio\archivos\00000069-AN1PD2004512\00000069-AN1PD2004512[001].edf"
+file_name = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..",
+    "archivos",
+    "00000069-AN1PD2004512",
+    "00000069-AN1PD2004512[001].edf",
+))
 
 
 
@@ -643,83 +708,77 @@ else:
 
 
 
-    # Metodo EMD
+    # Un solo EMD. La envolvente superior pasa por los máximos y la inferior por los valles.
 
     elif opcion.startswith("b") or opcion == "2":
         from PyEMD import EMD
-        print("Este es el metodo EMD")
+        from scipy.interpolate import PchipInterpolator
 
-        s_sis = np.asarray(taco_sis_interp, dtype=float)
-        s_dis = np.asarray(taco_dis_interp, dtype=float)
-        emd = EMD()
-        imfs_sis = emd(s_sis)
-        imfs_dis = emd(s_dis)
-        print(f"Sistolico: {len(imfs_sis)} IMFs, {len(s_sis)} muestras a {fs_interp} Hz")
-        print(f"Diastolico: {len(imfs_dis)} IMFs, {len(s_dis)} muestras a {fs_interp} Hz")
+        t_taco = np.asarray(t_taco_minutos, dtype=float)
+        y_taco = np.asarray(intervalos_ms, dtype=float)
+        t_prv = np.asarray(t_reg_sis_min, dtype=float)
+        # PCHIP pasa por cada latido y no inventa picos, a diferencia del spline cúbico.
+        y_prv = np.asarray(PchipInterpolator(t_taco, y_taco)(t_prv), dtype=float)
 
+        emd = EMD(spline_kind="pchip")
+        max_pos, max_val, min_pos, min_val, env_sup, env_inf, media = primer_paso_huang(emd, t_prv, y_prv)
+        print(f"EMD: {len(max_pos)} máximos, {len(min_pos)} valles")
 
-#Envolventes
-
-        kind_env = "cubic" if min(n_sis, n_dis) >= 4 else "linear"
-        env_sup = interp1d(
+        fig1, (ax_ppg, ax_taco) = plt.subplots(2, 1, figsize=(13, 7.2), sharex=True)
+        paso_ppg = max(1, int(round(fs / 80.0)))
+        ax_ppg.plot(
+            t_minutos[::paso_ppg], ppg_limpia[::paso_ppg],
+            color="#1f4e79", linewidth=0.6, label="PPG",
+        )
+        ax_ppg.plot(
             t_minutos[sistole], ppg_limpia[sistole],
-            kind=kind_env, bounds_error=False, fill_value=np.nan,   
-        )(t_minutos)
-        env_inf = interp1d(
+            linestyle="none", marker="^", color="#2e7d32", markersize=3,
+            label=f"Máximos n={len(sistole)}",
+        )
+        ax_ppg.plot(
             t_minutos[distole], ppg_limpia[distole],
-            kind=kind_env, bounds_error=False, fill_value=np.nan,
-        )(t_minutos)
-        env_media = (env_sup + env_inf) / 2.0
+            linestyle="none", marker="v", color="#6a1b9a", markersize=3,
+            label=f"Valles n={len(distole)}",
+        )
+        ax_ppg.set_title("PPG", loc="left")
+        ax_ppg.set_ylabel("Amplitud")
+        ax_ppg.grid(True, linestyle=":", alpha=0.45)
+        ax_ppg.margins(x=0.01)
+        ax_ppg.legend(loc="upper right", fontsize=8, frameon=False)
 
-        fig1, (ax_onda, ax_taco) = plt.subplots(2, 1, figsize=(14, 9), sharex=True)
-        paso = max(1, len(ppg_limpia) // 100000)
-        ax_onda.plot(t_minutos[::paso], ppg_limpia[::paso], color="#00459e", linewidth=0.8, label="PPG")
-        ax_onda.plot(t_minutos[sistole], ppg_limpia[sistole], "o", markersize=3, color="#3A8F01", label=f"Sistole n={n_sis}")
-        ax_onda.plot(t_minutos[distole], ppg_limpia[distole], "o", markersize=3, color="#a30bdf", label=f"Distole n={n_dis}")
-        ax_onda.plot(t_minutos[::paso], env_sup[::paso], "--", color="#3A8F01", linewidth=1.2, label="Envolvente superior")
-        ax_onda.plot(t_minutos[::paso], env_inf[::paso], "--", color="#a30bdf", linewidth=1.2, label="Envolvente inferior")
-        ax_onda.plot(t_minutos[::paso], env_media[::paso], ":", color="#555555", linewidth=1.0, label="Media")
-        ax_onda.set_ylabel("Amplitud")
-        ax_onda.set_title(f"PPG  |  Sistole: {n_sis}   Distole: {n_dis}")
-        ax_onda.legend(loc="upper right")
-        ax_onda.grid(True, linestyle=":", alpha=0.6)
-
-        ax_taco.plot(t_taco_minutos, intervalos_ms, color="#3A8F01", marker="o", markersize=3, linewidth=1, label="Tacograma sistolico")
-        ax_taco.plot(t_taco_distole_minutos, intervalos_ms_distole, color="#a30bdf", marker="o", markersize=3, linewidth=1, alpha=0.8, label="Tacograma diastolico")
-        ax_taco.set_ylabel("Intervalo PP (ms)")
+        dibujar_envolventes(
+            ax_taco, t_taco, y_taco, t_prv, max_pos, max_val, min_pos, min_val,
+            env_sup, env_inf, media, "Tacograma", "Tacograma",
+        )
         ax_taco.set_xlabel("Tiempo (minutos)")
-        ax_taco.set_title("Tacograma original (punto a punto)")
-        ax_taco.legend(loc="upper right")
-        ax_taco.grid(True, linestyle=":", alpha=0.6)
-        fig1.suptitle("Figura 1: PPG, envolventes y tacograma original", fontweight="bold")
-        fig1.tight_layout()
+        handles, labels = ax_taco.get_legend_handles_labels()
+        ax_taco.legend(handles, labels, loc="upper left", bbox_to_anchor=(1.01, 1), borderaxespad=0, fontsize=8, frameon=False)
+        fig1.suptitle("PPG y envolventes del tacograma", fontweight="bold")
+        fig1.tight_layout(rect=(0, 0, 0.86, 0.96))
 
+        # La media de las dos envolventes es lo que el tamizado resta. EMD repite ese paso.
+        emd(y_prv, t_prv)
+        imfs, residuo = emd.get_imfs_and_residue()
+        imfs = np.atleast_2d(np.asarray(imfs, dtype=float))
+        residuo = np.asarray(residuo, dtype=float)
+        print(f"Descomposición: {len(imfs)} IMFs + residuo, {len(y_prv)} muestras a {fs_interp} Hz")
 
-
-#IMFs graficas
-        n_imfs_sis = len(imfs_sis)
-        fig2, axes = plt.subplots(n_imfs_sis, 1, figsize=(14, 1.8 * n_imfs_sis), sharex=True)
-        if n_imfs_sis == 1:
+        n_filas = len(imfs) + 1
+        fig2, axes = plt.subplots(n_filas, 1, figsize=(13, 1.45 * n_filas), sharex=True)
+        if n_filas == 1:
             axes = [axes]
-        for i, imf in enumerate(imfs_sis):
-            axes[i].plot(t_reg_sis_min, imf)
-            axes[i].set_title(f"IMF {i + 1}")
-            axes[i].grid(True, linestyle=":", alpha=0.6)
+        for i, imf in enumerate(imfs):
+            axes[i].plot(t_prv, imf, color="#1f4e79", linewidth=0.8)
+            axes[i].set_ylabel(f"IMF {i + 1}")
+            axes[i].grid(True, linestyle=":", alpha=0.55)
+            axes[i].margins(x=0.01)
+        axes[-1].plot(t_prv, residuo, color="#e65100", linewidth=1.0)
+        axes[-1].set_ylabel("Residuo")
         axes[-1].set_xlabel("Tiempo (minutos)")
-        fig2.suptitle("Figura 2: IMFs del tacograma sistolico interpolado", fontweight="bold")
+        axes[-1].grid(True, linestyle=":", alpha=0.55)
+        axes[-1].margins(x=0.01)
+        fig2.suptitle("Descomposición empírica", fontweight="bold")
         fig2.tight_layout()
-
-        n_imfs_dis = len(imfs_dis)
-        fig3, axes = plt.subplots(n_imfs_dis, 1, figsize=(14, 1.8 * n_imfs_dis), sharex=True)
-        if n_imfs_dis == 1:
-            axes = [axes]
-        for i, imf in enumerate(imfs_dis):
-            axes[i].plot(t_reg_dis_min, imf)
-            axes[i].set_title(f"IMF {i + 1}")
-            axes[i].grid(True, linestyle=":", alpha=0.6)
-        axes[-1].set_xlabel("Tiempo (minutos)")
-        fig3.suptitle("Figura 3: IMFs del tacograma diastolico interpolado", fontweight="bold")
-        fig3.tight_layout()
         plt.show()
     else:
         print("Opcion no valida. Elige a o b.")
